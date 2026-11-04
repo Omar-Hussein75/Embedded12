@@ -1,89 +1,104 @@
-file_name=/apps/raidprd/raid-prj/scripts/logs/SDSL_Speed.log
+import duckdb
 
-$ORACLE_HOME/bin/sqlplus -s > $file_name <<END
-RP7VFEPIDAT/RP7VFEPIDAT@RAIDPRD
-INSERT INTO RP7VFEPIDAT.sdsl_speed
-SELECT Sid, Network_status, BIlling_status,Network_speed, BIlling_Speed,
-CASE WHEN d > 0 THEN 'BILLING HIGHER'
-         WHEN d < 0 THEN 'NETWORK HIGHER'
-         WHEN d =0      THEN 'MATCHING'
-         ELSE 'CANNOT IDENTIFY'
-         END AS BILLING_Vs_NETWORK
-         ,to_Date($1,'YYYYMMDD') RUN_DATE
-FROM (SELECT  Sid, Network_status, BIlling_status,Network_speed, BIlling_Speed,
-CASE WHEN (REGEXP_REPLACE(SUBSTR(trim(upper(Network_speed)),instr(upper(Network_speed),'G')),'(^[[:space:]]*|[[:space:]]*$)') = 'G'
-                        OR REGEXP_REPLACE(SUBSTR(trim(upper(Network_speed)),instr(upper(Network_speed),'M')),'(^[[:space:]]*|[[:space:]]*$)') = 'M'
-                        OR REGEXP_REPLACE(SUBSTR(trim(upper(Network_speed)),instr(upper(Network_speed),'K')),'(^[[:space:]]*|[[:space:]]*$)') = 'K'
-                  )
-                AND(REGEXP_REPLACE(SUBSTR(trim(upper(billing_speed)),instr(upper(billing_speed),'G')),'(^[[:space:]]*|[[:space:]]*$)') = 'G'
-                        OR REGEXP_REPLACE(SUBSTR(trim(billing_speed),instr(upper(billing_speed),'M')),'(^[[:space:]]*|[[:space:]]*$)') = 'M'
-                        OR REGEXP_REPLACE(SUBSTR(trim(upper(billing_speed)),instr(upper(billing_speed),'K')),'(^[[:space:]]*|[[:space:]]*$)') = 'K'
-                   )
+con = duckdb.connect("my.db")  # or an in-memory connection
+
+run_date_param = "20261104"  # equivalent to Oracle's $1 positional parameter
+
+con.execute(
+    """
+    CREATE OR REPLACE TABLE sdsl_speed AS
+    WITH ranked AS (
+        SELECT
+            bn.sid,
+            bn.network_status,
+            bn.billing_status,
+            row_number() OVER (
+                PARTITION BY bn.sid
+                ORDER BY
+                    strptime(n.parameter_date, '%d/%m/%Y') DESC,
+                    substr(n.actual_speed, 1, strpos(n.actual_speed, 'M') - 1) DESC
+            ) AS r,
+            CASE
+                WHEN upper(n.actual_speed) LIKE '%MBPS%' THEN replace(replace(upper(n.actual_speed), 'MBPS', 'M'), ' ', '')
+                WHEN upper(n.actual_speed) LIKE '%KBPS%' THEN replace(replace(upper(n.actual_speed), 'KBPS', 'K'), ' ', '')
+                WHEN upper(n.actual_speed) LIKE '%GBPS%' THEN replace(replace(upper(n.actual_speed), 'GBPS', 'G'), ' ', '')
+                WHEN n.actual_speed LIKE '%-%'          THEN substr(n.actual_speed, 1, strpos(n.actual_speed, '-') - 1)
+                WHEN n.actual_speed IS NULL             THEN '0'
+                ELSE n.actual_speed
+            END AS network_speed,
+            CASE
+                WHEN upper(b.value) LIKE '%MBPS%' THEN replace(replace(upper(b.value), 'MBPS', 'M'), ' ', '')
+                WHEN upper(b.value) LIKE '%KBPS%' THEN replace(replace(upper(b.value), 'KBPS', 'K'), ' ', '')
+                WHEN upper(b.value) LIKE '%GBPS%' THEN replace(replace(upper(b.value), 'GBPS', 'G'), ' ', '')
+                ELSE b.value
+            END AS billing_speed
+        FROM bscs_sdsl_vs_network bn
+        LEFT JOIN rd_t_bscs_sdsl b
+            ON bn.sid = b.sid
+           AND b.run_date = strptime(?, '%Y%m%d')::DATE
+           AND upper(b.parameter_name) = 'SPEED'
+        LEFT JOIN sdsl_network_stg n
+            ON bn.sid = n.sid
+           AND (upper(n.comments) NOT LIKE '%SHUT%' OR n.comments IS NULL)
+           AND (n.vrf IS NOT NULL OR (n.vrf IS NULL AND upper(n.service_type) = 'LAYER 2'))
+           AND (n.mngt_vrf = '0' OR n.mngt_vrf = '#N/A')
+           AND upper(n.actual_speed) NOT LIKE 'SL%'
+           AND upper(n.actual_speed) NOT LIKE 'ST%'
+        WHERE bn.network_status = 'ACTIVE'
+          AND bn.billing_status = 'A'
+          AND bn.run_date = strptime(?, '%Y%m%d')::DATE
+    ),
+    dedup AS (
+        SELECT sid, network_status, billing_status, network_speed, billing_speed
+        FROM ranked
+        WHERE r = 1
+    ),
+    converted AS (
+        SELECT
+            sid, network_status, billing_status, network_speed, billing_speed,
+            CASE
+                WHEN upper(network_speed) LIKE '%G%' THEN TRY_CAST(trim(substr(network_speed, 1, strpos(upper(network_speed), 'G') - 1)) AS DOUBLE) * 1024 * 1024
+                WHEN upper(network_speed) LIKE '%M%' THEN TRY_CAST(trim(substr(network_speed, 1, strpos(upper(network_speed), 'M') - 1)) AS DOUBLE) * 1024
+                WHEN upper(network_speed) LIKE '%K%' THEN TRY_CAST(trim(substr(upper(network_speed), 1, strpos(upper(network_speed), 'K') - 1)) AS DOUBLE)
+                WHEN network_speed = '0' THEN 0
+            END AS new_network_speed,
+            CASE
+                WHEN upper(billing_speed) LIKE '%G%' THEN TRY_CAST(trim(substr(billing_speed, 1, strpos(upper(billing_speed), 'G') - 1)) AS DOUBLE) * 1024 * 1024
+                WHEN upper(billing_speed) LIKE '%M%' THEN TRY_CAST(trim(substr(billing_speed, 1, strpos(upper(billing_speed), 'M') - 1)) AS DOUBLE) * 1024
+                WHEN upper(billing_speed) LIKE '%K%' THEN TRY_CAST(trim(substr(billing_speed, 1, strpos(upper(billing_speed), 'K') - 1)) AS DOUBLE)
+            END AS new_billing_speed
+        FROM dedup
+    ),
+    diffed AS (
+        SELECT
+            sid, network_status, billing_status, network_speed, billing_speed,
+            CASE
+                WHEN (trim(substr(upper(network_speed), strpos(upper(network_speed), 'G'))) = 'G'
+                      OR trim(substr(upper(network_speed), strpos(upper(network_speed), 'M'))) = 'M'
+                      OR trim(substr(upper(network_speed), strpos(upper(network_speed), 'K'))) = 'K')
+                 AND (trim(substr(upper(billing_speed), strpos(upper(billing_speed), 'G'))) = 'G'
+                      OR trim(substr(upper(billing_speed), strpos(upper(billing_speed), 'M'))) = 'M'
+                      OR trim(substr(upper(billing_speed), strpos(upper(billing_speed), 'K'))) = 'K')
                 THEN new_billing_speed - new_network_speed
-                END AS d
-FROM(
-Select sid,NETWORK_STATUS,BILLING_STATUS,NETWORK_SPEED,BILLING_SPEED,
-CASE WHEN upper(network_speed) LIKE '%G%'
-        THEN TO_NUMBER(REGEXP_REPLACE(SUBSTR(trim(NETWORK_SPEED),1,instr(NETWORK_SPEED ,'G')-1),'(^[[:space:]]*|[[:space:]]*$)')) * 1024 * 1024
-        WHEN upper(network_speed) LIKE '%M%'
-        THEN TO_NUMBER(REGEXP_REPLACE(SUBSTR(trim(NETWORK_SPEED),1,instr(NETWORK_SPEED ,'M')-1),'(^[[:space:]]*|[[:space:]]*$)')) * 1024
-        WHEN upper(network_speed) LIKE '%K%'
-        THEN TO_NUMBER(REGEXP_REPLACE(SUBSTR(trim(Upper(NETWORK_SPEED)),1,instr(upper(NETWORK_SPEED),'K')-1),'(^[[:space:]]*|[[:space:]]*$)'))
-        WHEN network_speed ='0'
-        THEN 0
-        END AS new_network_speed,
-CASE WHEN upper(BILLING_SPEED) LIKE '%G%'
-        THEN TO_NUMBER(REGEXP_REPLACE(SUBSTR(trim(BILLING_SPEED),1,instr(BILLING_SPEED ,'G')-1),'(^[[:space:]]*|[[:space:]]*$)')) * 1024 * 1024
-        WHEN upper(BILLING_SPEED) LIKE '%M%'
-        THEN TO_NUMBER(REGEXP_REPLACE(SUBSTR(trim(BILLING_SPEED),1,instr(BILLING_SPEED ,'M')-1),'(^[[:space:]]*|[[:space:]]*$)')) * 1024
-        WHEN upper(BILLING_SPEED) LIKE '%K%'
-        THEN TO_NUMBER(REGEXP_REPLACE(SUBSTR(trim(BILLING_SPEED),1,instr(BILLING_SPEED ,'K')-1),'(^[[:space:]]*|[[:space:]]*$)'))
-        END AS new_BILLING_SPEED
-FROM (SELECT bn.sid, bn.NETWORK_STATUS,bn.BILLING_STATUS,
-row_number()OVER (PARTITION BY bn.sid ORDER BY to_date(PARAMETER_DATE,'DD/MM/YYYY')DESC,SUBSTR(ACTUAL_SPEED,1,instr(ACTUAL_SPEED ,'M')-1)desc) r,
-CASE WHEN upper(ACTUAL_SPEED) LIKE '%MBPS%'
-                                THEN REPLACE(REPLACE(upper(ACTUAL_SPEED),'MBPS','M'),' ','')
-         WHEN upper(ACTUAL_SPEED) LIKE '%KBPS%'
-                                THEN REPLACE(REPLACE(upper(ACTUAL_SPEED),'KBPS','K'),' ','')
-        WHEN upper(ACTUAL_SPEED) LIKE '%GBPS%'
-                                THEN REPLACE(REPLACE(upper(ACTUAL_SPEED),'GBPS','G'),' ','')
-        WHEN n.ACTUAL_SPEED LIKE '%-%'
-                THEN SUBSTR(n.ACTUAL_SPEED,1,(instr(n.ACTUAL_SPEED,'-'))-1)
-         WHEN n.ACTUAL_SPEED IS NULL
-                THEN '0'
-         ELSE ACTUAL_SPEED
-         END AS NETWORK_SPEED,
-CASE WHEN upper(b.VALUE) LIKE '%MBPS%'
-                                THEN REPLACE(REPLACE(upper(VALUE),'MBPS','M'),' ','')
-                        WHEN upper(b.Value) LIKE '%KBPS%'
-                                THEN REPLACE(REPLACE(upper(VALUE),'KBPS','K'),' ','')
-                        WHEN upper(b.Value) LIKE '%GBPS%'
-                                THEN REPLACE(REPLACE(upper(VALUE),'GBPS','G'),' ','')
-                        ELSE value
-                END AS BILLING_SPEED
-FROM RP7VFEPIDAT.bscs_sdsl_vs_network bn
-Left JOIN RP7VFEPIDAT.RD_T_BSCS_SDSL b
-        ON bn.sid =b.sid AND b.RUN_DATE =to_Date($1,'YYYYMMDD') AND upper(b.PARAMETER_NAME) ='SPEED'
-LEFT JOIN RP7VFEPIDAT.SDSL_NETWORK_STG n
-        ON bn.sid = n.SID AND (upper(COMMENTS) NOT LIKE upper('%shut%') OR (COMMENTS IS NULL))
-                AND (VRF IS NOT NULL OR (VRF IS NULL AND upper(SERVICE_TYPE) =upper('Layer 2')))
-                AND ((MNGT_VRF ='0') OR (MNGT_VRF='#N/A'))
-                AND  UPPER(ACTUAL_SPEED) NOT LIKE 'SL%' AND UPPER(ACTUAL_SPEED) NOT LIKE 'ST%'
-WHERE bn.NETWORK_STATUS ='ACTIVE'AND BILLING_STATUS ='A'
-AND bn.run_date =to_Date($1,'YYYYMMDD')
---AND bn.sid ='469/166'
---AND  UPPER(ACTUAL_SPEED) NOT LIKE 'SL%' AND UPPER(ACTUAL_SPEED) NOT LIKE 'ST%'
+            END AS d
+        FROM converted
+    )
+    SELECT
+        sid            AS "Sid",
+        network_status AS "Network_status",
+        billing_status AS "Billing_status",
+        network_speed  AS "Network_speed",
+        billing_speed  AS "Billing_Speed",
+        CASE
+            WHEN d > 0 THEN 'BILLING HIGHER'
+            WHEN d < 0 THEN 'NETWORK HIGHER'
+            WHEN d = 0 THEN 'MATCHING'
+            ELSE 'CANNOT IDENTIFY'
+        END AS "Billing_Vs_Network",
+        strptime(?, '%Y%m%d')::DATE AS "RUN_DATE"
+    FROM diffed
+    """,
+    [run_date_param, run_date_param, run_date_param],
 )
-where r=1
---AND sid ='469/166'
-)
---WHERE sid ='147702/30'
-)
---WHERE sid IN (SELECT sid FROM RP7VFEPIDAT.SDSL_SPEED
---WHERE RUN_DATE =$1
---AND BILLING_VS_NETWORK ='CANNOT IDENTIFY')
-;
 
-COMMIT;
-exit;
-END
+print(con.sql("SELECT * FROM sdsl_speed LIMIT 20"))
