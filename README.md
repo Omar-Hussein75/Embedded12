@@ -185,6 +185,9 @@ con.execute(f"""
             bn.sid,
             bn.network_status,
             bn.billing_status,
+            n.MGT_VRF,
+            n.PE_Speed,
+            n.PE_Speed_Rule_Status,
             row_number() OVER (
                 PARTITION BY bn.sid
                 ORDER BY
@@ -222,13 +225,13 @@ con.execute(f"""
           AND bn.run_date = TRY_CAST('{run_date_formatted}' AS DATE)
     ),
     dedup AS (
-        SELECT sid, network_status, billing_status, network_speed, billing_speed
+        SELECT sid, network_status, billing_status, MGT_VRF, PE_Speed, PE_Speed_Rule_Status, network_speed, billing_speed
         FROM ranked
         WHERE r = 1
     ),
     converted AS (
         SELECT
-            sid, network_status, billing_status, network_speed, billing_speed,
+            sid, network_status, billing_status, MGT_VRF, PE_Speed, PE_Speed_Rule_Status, network_speed, billing_speed,
             CASE
                 WHEN upper(network_speed) LIKE '%G%' THEN TRY_CAST(trim(substr(network_speed, 1, strpos(upper(network_speed), 'G') - 1)) AS DOUBLE) * 1024 * 1024
                 WHEN upper(network_speed) LIKE '%M%' THEN TRY_CAST(trim(substr(network_speed, 1, strpos(upper(network_speed), 'M') - 1)) AS DOUBLE) * 1024
@@ -244,7 +247,7 @@ con.execute(f"""
     ),
     diffed AS (
         SELECT
-            sid, network_status, billing_status, network_speed, billing_speed,
+            sid, network_status, billing_status, MGT_VRF, PE_Speed, PE_Speed_Rule_Status, network_speed, billing_speed,
             CASE
                 WHEN (trim(substr(upper(network_speed), strpos(upper(network_speed), 'G'))) = 'G'
                       OR trim(substr(upper(network_speed), strpos(upper(network_speed), 'M'))) = 'M'
@@ -257,11 +260,14 @@ con.execute(f"""
         FROM converted
     )
     SELECT
-        sid            AS "Sid",
-        network_status AS "Network_status",
-        billing_status AS "Billing_status",
-        network_speed  AS "Network_speed",
-        billing_speed  AS "Billing_Speed",
+        sid                 AS "Sid",
+        network_status      AS "Network_status",
+        billing_status      AS "Billing_status",
+        MGT_VRF             AS "MGT_VRF",
+        PE_Speed            AS "PE_Speed",
+        PE_Speed_Rule_Status AS "PE_Speed_Rule_Status",
+        network_speed       AS "Network_speed",
+        billing_speed       AS "Billing_Speed",
         CASE
             WHEN d > 0 THEN 'BILLING HIGHER'
             WHEN d < 0 THEN 'NETWORK HIGHER'
@@ -271,6 +277,8 @@ con.execute(f"""
         TRY_CAST('{run_date_formatted}' AS DATE) AS "RUN_DATE"
     FROM diffed
 """)
+
+print(con.sql("SELECT * FROM sdsl_speed LIMIT 20"))
 
 print(con.sql("SELECT * FROM sdsl_speed LIMIT 20"))
         """)
