@@ -17,6 +17,16 @@ bscs_sdsl_vs_network_path = f"/project/PLATFORM_INTEGRITY/exports/BSCS_SDSL_VS_N
 con = duckdb_connection()
 
 con.execute(f"""
+    CREATE OR REPLACE TABLE bscs_sdsl_vs_network AS
+    SELECT
+        TRY_CAST(sid AS VARCHAR)             AS sid,
+        TRY_CAST(network_status AS VARCHAR)  AS network_status,
+        TRY_CAST(billing_status AS VARCHAR)  AS billing_status,
+        TRY_CAST(run_date AS DATE)           AS run_date
+    FROM read_csv_auto('{bscs_sdsl_vs_network_path}', ignore_errors=True)
+""")
+
+con.execute(f"""
     CREATE OR REPLACE TABLE sdsl_network AS
     WITH base AS (
         SELECT
@@ -209,7 +219,7 @@ con.execute(f"""
                 WHEN upper(b.value) LIKE '%GBPS%' THEN replace(replace(upper(b.value), 'GBPS', 'G'), ' ', '')
                 ELSE b.value
             END AS billing_speed
-        FROM read_csv_auto('{bscs_sdsl_vs_network_path}', ignore_errors=True) bn
+        FROM bscs_sdsl_vs_network bn
         LEFT JOIN bscs_sdsl b
             ON bn.sid = b.sid
            AND b.run_date = TRY_CAST('{run_date_formatted}' AS DATE)
@@ -280,3 +290,13 @@ con.execute(f"""
 """)
 
 print(con.sql("SELECT * FROM sdsl_speed LIMIT 20"))
+
+
+
+print(con.sql(f"""
+    SELECT bn.sid AS bn_sid, typeof(bn.sid) AS bn_sid_type,
+           n.SID AS n_sid, typeof(n.SID) AS n_sid_type
+    FROM read_csv_auto('{bscs_sdsl_vs_network_path}', ignore_errors=True) bn
+    LEFT JOIN sdsl_network n ON upper(trim(CAST(bn.sid AS VARCHAR))) = upper(trim(n.SID))
+    LIMIT 20
+"""))
