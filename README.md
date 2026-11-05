@@ -16,7 +16,6 @@ bscs_sdsl_vs_network_path = f"/project/PLATFORM_INTEGRITY/exports/BSCS_SDSL_VS_N
 
 con = duckdb_connection()
 
-
 con.execute(f"""
     CREATE OR REPLACE TABLE sdsl_network AS
     WITH base AS (
@@ -170,7 +169,7 @@ con.execute(f"""
             TRY_CAST(SERVICE_CODE AS VARCHAR) AS SERVICE_CODE,
             TRY_CAST(SERVICE_STATUS AS VARCHAR) AS SERVICE_STATUS,
             TRY_CAST(PARAMETER_DATE AS VARCHAR) AS PARAMETER_DATE,
-            TRY_CAST(INTERVAL AS VARCHAR) AS INTERVAL,
+            TRY_CAST("INTERVAL" AS VARCHAR) AS "INTERVAL",
             TRY_CAST(PARAMETER_NAME AS VARCHAR) AS PARAMETER_NAME,
             TRY_CAST(DESCRIPTION AS VARCHAR) AS DESCRIPTION,
             TRY_CAST(VALUE AS VARCHAR) AS VALUE,
@@ -178,11 +177,9 @@ con.execute(f"""
             TRY_CAST(PRICE AS VARCHAR) AS PRICE,
             TRY_CAST('{run_date_formatted}' AS DATE) AS RUN_DATE
         FROM read_csv_auto('{billing_path}',ignore_errors=True,delim='|')
-        """)
-
-
-result = con.query(
-    f"""
+        
+con.execute(f"""
+    CREATE OR REPLACE TABLE sdsl_speed AS
     WITH ranked AS (
         SELECT
             bn.sid,
@@ -208,10 +205,10 @@ result = con.query(
                 WHEN upper(b.value) LIKE '%GBPS%' THEN replace(replace(upper(b.value), 'GBPS', 'G'), ' ', '')
                 ELSE b.value
             END AS billing_speed
-        FROM read_csv_auto('{bscs_sdsl_vs_network_path}',ignore_errors=True) bn
+        FROM read_csv_auto('{bscs_sdsl_vs_network_path}', ignore_errors=True) bn
         LEFT JOIN bscs_sdsl b
             ON bn.sid = b.sid
-           AND b.run_date = strptime(?, '%Y%m%d')::DATE
+           AND b.run_date = TRY_CAST('{run_date_formatted}' AS DATE)
            AND upper(b.parameter_name) = 'SPEED'
         LEFT JOIN sdsl_network n
             ON bn.sid = n.sid
@@ -222,7 +219,7 @@ result = con.query(
            AND upper(n.actual_speed) NOT LIKE 'ST%'
         WHERE bn.network_status = 'ACTIVE'
           AND bn.billing_status = 'A'
-          AND bn.run_date = strptime(?, '%Y%m%d')::DATE
+          AND bn.run_date = TRY_CAST('{run_date_formatted}' AS DATE)
     ),
     dedup AS (
         SELECT sid, network_status, billing_status, network_speed, billing_speed
@@ -271,12 +268,10 @@ result = con.query(
             WHEN d = 0 THEN 'MATCHING'
             ELSE 'CANNOT IDENTIFY'
         END AS "Billing_Vs_Network",
-        strptime(?, '%Y%m%d')::DATE AS "RUN_DATE"
+        TRY_CAST('{run_date_formatted}' AS DATE) AS "RUN_DATE"
     FROM diffed
-    """,
-    [run_date_param, run_date_param, run_date_param],
-)
+""")
 
 print(con.sql("SELECT * FROM sdsl_speed LIMIT 20"))
-
+        """)
 
