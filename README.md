@@ -303,22 +303,81 @@ print(con.sql(f"""
 
 
 
+┌────────┐
+│ loaded │
+│ int64  │
+├────────┤
+│  10638 │
+└────────┘
 
-# 1. Are rows being dropped during load?
-print(con.sql("SELECT count(*) AS loaded FROM sdsl_network"))
-print(con.sql(f"SELECT count(*) AS in_file FROM read_csv('{sdsl_network_path}', all_varchar=true)"))
+┌─────────┐
+│ in_file │
+│  int64  │
+├─────────┤
+│   10638 │
+└─────────┘
 
-# 2. What types did DuckDB infer?
-print(con.sql(f"DESCRIBE SELECT * FROM read_csv_auto('{sdsl_network_path}', ignore_errors=True)"))
-print(con.sql(f"DESCRIBE SELECT * FROM read_csv_auto('{bscs_sdsl_vs_network_path}', ignore_errors=True)"))
+┌────────────────┬─────────────┬─────────┬─────────┬─────────┬─────────┐
+│  column_name   │ column_type │  null   │   key   │ default │  extra  │
+│    varchar     │   varchar   │ varchar │ varchar │ varchar │ varchar │
+├────────────────┼─────────────┼─────────┼─────────┼─────────┼─────────┤
+│ SID            │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ PE Interface   │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ WAN IP         │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ MGT VRF        │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ VRF            │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ Actual Speed   │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ PE Describtion │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ Comments       │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ PE Speed       │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ Service Type   │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ Branch Name    │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ Entry Date     │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+├────────────────┴─────────────┴─────────┴─────────┴─────────┴─────────┤
+│ 12 rows                                                    6 columns │
+└──────────────────────────────────────────────────────────────────────┘
 
-# 3. Does the data in sdsl_network look right?
-print(con.sql("SELECT MGT_VRF, count(*) FROM sdsl_network GROUP BY 1 ORDER BY 2 DESC LIMIT 10"))
-print(con.sql("SELECT PE_Speed, PE_Speed_Rule_Status FROM sdsl_network LIMIT 10"))
+┌────────────────┬─────────────┬─────────┬─────────┬─────────┬─────────┐
+│  column_name   │ column_type │  null   │   key   │ default │  extra  │
+│    varchar     │   varchar   │ varchar │ varchar │ varchar │ varchar │
+├────────────────┼─────────────┼─────────┼─────────┼─────────┼─────────┤
+│ SID            │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ NETWORK_STATUS │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ BILLING_STATUS │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ IMPACT         │ VARCHAR     │ YES     │ NULL    │ NULL    │ NULL    │
+│ RUN_DATE       │ TIMESTAMP   │ YES     │ NULL    │ NULL    │ NULL    │
+└────────────────┴─────────────┴─────────┴─────────┴─────────┴─────────┘
 
-# 4. Do the SIDs overlap at all?
-print(con.sql(f"""
-    SELECT count(*) AS bn_rows, count(n.sid) AS matched
-    FROM read_csv('{bscs_sdsl_vs_network_path}', all_varchar=true, ignore_errors=true) bn
-    LEFT JOIN sdsl_network n ON trim(bn.sid) = trim(n.sid)
-"""))
+┌─────────┬──────────────┐
+│ MGT_VRF │ count_star() │
+│ varchar │    int64     │
+├─────────┼──────────────┤
+│ l3      │         8321 │
+│ NULL    │         1766 │
+│ l2      │          551 │
+└─────────┴──────────────┘
+
+┌──────────┬──────────────────────┐
+│ PE_Speed │ PE_Speed_Rule_Status │
+│ varchar  │       varchar        │
+├──────────┼──────────────────────┤
+│ 1.2M     │ VALID: l3 only SID   │
+│ 20M      │ VALID: l3 only SID   │
+│ 70M      │ VALID: l3 only SID   │
+│ 100M     │ VALID: l3 only SID   │
+│ 20M      │ VALID: l2 only SID   │
+│ 1G       │ VALID: l2 only SID   │
+│ 200M     │ VALID: l3 only SID   │
+│ 400M     │ VALID: l3 only SID   │
+│ 4M       │ VALID: l3 only SID   │
+│ 50M      │ VALID: l3 only SID   │
+├──────────┴──────────────────────┤
+│ 10 rows               2 columns │
+└─────────────────────────────────┘
+
+┌─────────┬─────────┐
+│ bn_rows │ matched │
+│  int64  │  int64  │
+├─────────┼─────────┤
+│   19761 │   10638 │
+└─────────┴─────────┘
