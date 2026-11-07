@@ -300,3 +300,25 @@ print(con.sql(f"""
     LEFT JOIN sdsl_network n ON upper(trim(CAST(bn.sid AS VARCHAR))) = upper(trim(n.SID))
     LIMIT 20
 """))
+
+
+
+
+# 1. Are rows being dropped during load?
+print(con.sql("SELECT count(*) AS loaded FROM sdsl_network"))
+print(con.sql(f"SELECT count(*) AS in_file FROM read_csv('{sdsl_network_path}', all_varchar=true)"))
+
+# 2. What types did DuckDB infer?
+print(con.sql(f"DESCRIBE SELECT * FROM read_csv_auto('{sdsl_network_path}', ignore_errors=True)"))
+print(con.sql(f"DESCRIBE SELECT * FROM read_csv_auto('{bscs_sdsl_vs_network_path}', ignore_errors=True)"))
+
+# 3. Does the data in sdsl_network look right?
+print(con.sql("SELECT MGT_VRF, count(*) FROM sdsl_network GROUP BY 1 ORDER BY 2 DESC LIMIT 10"))
+print(con.sql("SELECT PE_Speed, PE_Speed_Rule_Status FROM sdsl_network LIMIT 10"))
+
+# 4. Do the SIDs overlap at all?
+print(con.sql(f"""
+    SELECT count(*) AS bn_rows, count(n.sid) AS matched
+    FROM read_csv('{bscs_sdsl_vs_network_path}', all_varchar=true, ignore_errors=true) bn
+    LEFT JOIN sdsl_network n ON trim(bn.sid) = trim(n.sid)
+"""))
