@@ -13,6 +13,7 @@ run_date_formatted = f"{RUN_DATE[:4]}-{RUN_DATE[4:6]}-{RUN_DATE[6:]}"
 billing_path = f"/RAIDdata/PI/SDSL/BSCS_SDSL/raw/SDSL_BSCS_PROFILES_{RUN_DATE}.csv.gz"
 sdsl_network_path = f"/RAIDdata/PI/SDSL/SDSL_Network/in/SDSL_{RUN_DATE}.csv"
 bscs_sdsl_vs_network_path = "/project/PLATFORM_INTEGRITY/exports/BSCS_SDSL_VS_NETWORK_202611051550.csv"
+output_path = f"/project/PLATFORM_INTEGRITY/exports/SDSL_SPEED_RESULT_{RUN_DATE}.csv"
 
 con = duckdb_connection()
 
@@ -296,3 +297,13 @@ print(con.sql("""
     FROM sdsl_speed
     GROUP BY 1 ORDER BY n DESC
 """))
+
+# ---------------------------------------------------------------------------
+# 4) Export results to CSV
+# ---------------------------------------------------------------------------
+con.execute(f"""
+    COPY (SELECT * FROM sdsl_speed ORDER BY "Sid")
+    TO '{output_path}'
+    (FORMAT CSV, HEADER, DELIMITER ',')
+""")
+print(f"Exported {con.sql('SELECT count(*) FROM sdsl_speed').fetchone()[0]} rows to {output_path}")
