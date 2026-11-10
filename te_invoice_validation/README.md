@@ -95,7 +95,8 @@ The script:
 2. Builds the result once into a DuckDB temp table.
 3. Applies the original follow-up `UPDATE`:
    `CUSTOMER_TYPE = 'NA'` where it is NULL.
-4. Prints the result, the row count and a breakdown by `CASE_COMMENT`.
+4. Prints a **source check**, then the result, the row count and a breakdown by
+   `CASE_COMMENT`.
 5. Writes the CSV to `export_path`.
 
 ---
@@ -103,8 +104,19 @@ The script:
 ## Inputs
 
 All files are CSV files with a header row and `,` as the delimiter. Every column
-is read as text, so that MSISDNs keep their leading zeros and join the same way
-across all sources. `RUN_DATE` may be stored as `20260928` or `2026-09-28`.
+is read as text, so values are never changed by type guessing.
+
+**Dates.** `RUN_DATE` (and `TIME` in the quota file) may be in any of these
+formats: `20260928`, `2026-09-28`, `2026-09-28 00:00:00`, `28/09/2026`,
+`28/09/2026 00:00:00`, `28-SEP-26` or `28-SEP-2026`. Only midnight matches,
+as with Oracle's `to_date`.
+
+**MSISDNs.** The sources don't all write numbers the same way. For example the
+TE data flow writes `20225551234`, while another export may have `0225551234`
+or `225551234`. Every source is joined on a normalised key: digits only, a
+trailing `.0` removed, leading `0`s removed and a leading `20` country code
+removed. All the examples above become `225551234`. `TE_MSISDN` in the output
+keeps the TE value unchanged.
 
 | Source (Oracle table) | Export | Filter applied | Columns used |
 |-----------------------|--------|----------------|--------------|
@@ -120,6 +132,27 @@ across all sources. `RUN_DATE` may be stored as `20260928` or `2026-09-28`.
 > `PACKAGE_TYPE`. If the exports used by the quota flow don't have them, point
 > these paths at the `PFM_BSCS_ADSL`, `PFM_PCRF_FILTERED` and
 > `RD_T_IN_ADSL_HISTORICAL` exports instead.
+
+---
+
+## Source check (troubleshooting)
+
+Every run prints one line per source before the result, for example:
+
+```
+Source check for run date 2026-09-28:
+  TE        file rows:  1,200,000   rows for run date:  1,200,000
+  BSCS      file rows:  1,150,000   rows for run date:  1,150,000   TE lines matched:  1,140,000
+  RADIUS    file rows:    900,000   rows for run date:          0   TE lines matched:          0   <-- no rows for the run date, check the date format
+```
+
+If every status is `Not_Exist` and PCRF/quota are empty, this check shows why:
+
+| What you see | Likely cause |
+|--------------|--------------|
+| `rows for run date: 0` while `file rows` > 0 | `RUN_DATE`/`TIME` is in a format not in the list above, or the file holds another date |
+| `TE lines matched: 0` while `rows for run date` > 0 | The MSISDN format can't be matched to TE. Compare a few numbers from both files |
+| TE `rows for run date: 0` | The TE file is for another date. Rerun the TE data flow for this date |
 
 ---
 

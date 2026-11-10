@@ -62,9 +62,21 @@ if not os.path.exists(quota_path):
 
 
 # Read every column as text so that:
-#  - MSISDNs keep their leading zeros and join the same way across all sources
+#  - MSISDNs keep their leading zeros
 #  - status codes and dates are interpreted explicitly below, not guessed
 CSV_OPTS = "all_varchar = TRUE, ignore_errors = TRUE, delim = ','"
+
+# RUN_DATE / TIME formats accepted in the exports
+DATE_FORMATS = [
+    "%Y%m%d",               # 20260928        (to_number('$1') columns)
+    "%Y-%m-%d",             # 2026-09-28
+    "%Y-%m-%d %H:%M:%S",    # 2026-09-28 00:00:00
+    "%d/%m/%Y",             # 28/09/2026
+    "%d/%m/%Y %H:%M:%S",    # 28/09/2026 00:00:00
+    "%d-%b-%y",             # 28-SEP-26       (Oracle default date export)
+    "%d-%b-%Y",             # 28-SEP-2026
+]
+DATE_FORMATS_SQL = "[" + ", ".join(f"'{f}'" for f in DATE_FORMATS) + "]"
 
 
 def txt(col):
@@ -74,85 +86,137 @@ def txt(col):
 
 def date_matches(col):
     """
-    True when the column equals the run date.
-    Covers both original filters: run_date = to_number('$1') (stored as 20260928)
-    and run_date = to_date('$1','YYYYMMDD') (stored as 2026-09-28, midnight only).
+    True when the column equals the run date (midnight only, like Oracle's
+    run_date = to_date('$1','YYYYMMDD'); also covers run_date = to_number('$1')).
     """
     return (
-        f"COALESCE(TRY_STRPTIME(TRIM({col}), '%Y%m%d'), "
-        f"TRY_CAST(TRIM({col}) AS TIMESTAMP)) = TIMESTAMP '{run_date_formatted} 00:00:00'"
+        f"TRY_STRPTIME(TRIM({col}), {DATE_FORMATS_SQL}) "
+        f"= TIMESTAMP '{run_date_formatted} 00:00:00'"
     )
+
+
+def msisdn_key(col):
+    """
+    Join key for an MSISDN, so the same line matches whatever format each
+    export uses: 20225551234, 0225551234, 225551234, +20 2 2555 1234,
+    225551234.0 all give 225551234 (national number, no 0 / 20 prefix).
+    """
+    digits = (
+        f"LTRIM(regexp_replace(regexp_replace(TRIM({col}), '\\.0+$', ''), "
+        f"'[^0-9]', '', 'g'), '0')"
+    )
+    return (
+        f"NULLIF(CASE WHEN {digits} LIKE '20%' AND LENGTH({digits}) IN (11, 12) "
+        f"THEN SUBSTR({digits}, 3) ELSE {digits} END, '')"
+    )
+
+
+# One temp table per source, filtered exactly like the original sub-queries.
+# The originals use SELECT DISTINCT *; the final SELECT DISTINCT makes a
+# DISTINCT on the used columns equivalent.
+SOURCES = {
+    # RD_T_TE_DATA_BASE_HISTORICAL
+    # (outer filter WHERE run_date = to_date('$1') only touches TE columns,
+    #  so it is applied here; with LEFT JOINs the result is identical)
+    "TE": (te_path, f"""
+        SELECT
+            DATE '{run_date_formatted}'      AS RUN_DATE,
+            {txt('MSISDN')}                  AS MSISDN,
+            {msisdn_key('MSISDN')}           AS MSISDN_KEY,
+            {txt('TE_SPEED')}                AS TE_SPEED
+        FROM read_csv_auto('{te_path}', {CSV_OPTS})
+        WHERE {date_matches('RUN_DATE')}
+    """),
+    # PFM_BSCS_ADSL WHERE run_date = to_number('$1')
+    "BSCS": (bscs_path, f"""
+        SELECT DISTINCT
+            {msisdn_key('MSISDN')}           AS MSISDN_KEY,
+            {txt('STATUS')}                  AS STATUS,
+            {txt('"TYPE"')}                  AS "TYPE"
+        FROM read_csv_auto('{bscs_path}', {CSV_OPTS})
+        WHERE {date_matches('RUN_DATE')}
+    """),
+    # PFM_PCRF_FILTERED WHERE RUN_DATE = to_date('$1','YYYYMMDD')
+    "PCRF": (pcrf_path, f"""
+        SELECT DISTINCT
+            {msisdn_key('MSISDN')}           AS MSISDN_KEY,
+            {txt('CUSTOMER_STATUS')}         AS CUSTOMER_STATUS
+        FROM read_csv_auto('{pcrf_path}', {CSV_OPTS})
+        WHERE {date_matches('RUN_DATE')}
+    """),
+    # PFM_RADIUS WHERE run_date = to_number('$1')
+    "RADIUS": (radius_path, f"""
+        SELECT DISTINCT
+            {msisdn_key('MSISDN')}           AS MSISDN_KEY,
+            {txt('STATUS')}                  AS STATUS
+        FROM read_csv_auto('{radius_path}', {CSV_OPTS})
+        WHERE {date_matches('RUN_DATE')}
+    """),
+    # RD_T_IN_ADSL_HISTORICAL
+    # WHERE PACKAGE_TYPE = 'DSL Status' AND run_date = to_date('$1','YYYYMMDD')
+    "CHARGING": (charging_path, f"""
+        SELECT DISTINCT
+            {msisdn_key('MSISDN')}           AS MSISDN_KEY,
+            {txt('STATUS')}                  AS STATUS
+        FROM read_csv_auto('{charging_path}', {CSV_OPTS})
+        WHERE {txt('PACKAGE_TYPE')} = 'DSL Status'
+          AND {date_matches('RUN_DATE')}
+    """),
+    # QUOTA_NAME_LKP WHERE Time = to_date('$1','YYYYMMDD')
+    "QUOTA": (quota_path, f"""
+        SELECT DISTINCT
+            {msisdn_key('MSISDN')}           AS MSISDN_KEY,
+            {txt('QUOTA_NAME')}              AS QUOTA_NAME
+        FROM read_csv_auto('{quota_path}', {CSV_OPTS})
+        WHERE {date_matches('"TIME"')}
+    """),
+}
+
+for name, (_, sql) in SOURCES.items():
+    con.execute(f"CREATE OR REPLACE TEMP TABLE src_{name} AS {sql}")
+
+# Per-source check: rows kept for the run date, and how many TE lines they match.
+# 0 rows  -> the date filter removed everything (check RUN_DATE / TIME format)
+# 0 match -> rows exist but no MSISDN matches TE (check the MSISDN format)
+print(f"Source check for run date {run_date_formatted}:")
+for name, (path, _) in SOURCES.items():
+    file_rows = con.execute(
+        f"SELECT COUNT(*) FROM read_csv_auto('{path}', {CSV_OPTS})"
+    ).fetchall()[0][0]
+    kept = con.execute(f"SELECT COUNT(*) FROM src_{name}").fetchall()[0][0]
+    line = f"  {name:<9} file rows: {file_rows:>10,}   rows for run date: {kept:>10,}"
+    if name != "TE":
+        matched = con.execute(f"""
+            SELECT COUNT(DISTINCT t.MSISDN_KEY)
+            FROM src_TE t JOIN src_{name} s ON t.MSISDN_KEY = s.MSISDN_KEY
+        """).fetchall()[0][0]
+        line += f"   TE lines matched: {matched:>10,}"
+        if file_rows and not kept:
+            line += "   <-- no rows for the run date, check the date format"
+        elif kept and not matched:
+            line += "   <-- no MSISDN matches TE, check the MSISDN format"
+    elif file_rows and not kept:
+        line += "   <-- no TE rows for the run date, check the date format"
+    print(line)
 
 
 con.execute(f"""
         CREATE OR REPLACE TEMP TABLE te_invoice_validation AS
 
         WITH
-        -- RD_T_TE_DATA_BASE_HISTORICAL
-        -- (outer filter WHERE run_date = to_date('$1') only touches TE columns,
-        --  so it is applied here; with LEFT JOINs the result is identical)
-        TE_SRC AS (
-            SELECT
-                DATE '{run_date_formatted}'                          AS RUN_DATE,
-                {txt('MSISDN')}                                      AS MSISDN,
-                {txt('TE_SPEED')}                                    AS TE_SPEED
-            FROM read_csv_auto('{te_path}', {CSV_OPTS})
-            WHERE {date_matches('RUN_DATE')}
-        ),
-
-        -- PFM_BSCS_ADSL WHERE run_date = to_number('$1')
-        BSCS AS (
-            SELECT DISTINCT
-                {txt('MSISDN')}                                      AS MSISDN,
-                {txt('STATUS')}                                      AS STATUS,
-                {txt('"TYPE"')}                                      AS "TYPE"
-            FROM read_csv_auto('{bscs_path}', {CSV_OPTS})
-            WHERE {date_matches('RUN_DATE')}
-        ),
-
-        -- PFM_PCRF_FILTERED WHERE RUN_DATE = to_date('$1','YYYYMMDD')
-        PCRF AS (
-            SELECT DISTINCT
-                {txt('MSISDN')}                                      AS MSISDN,
-                {txt('CUSTOMER_STATUS')}                             AS CUSTOMER_STATUS
-            FROM read_csv_auto('{pcrf_path}', {CSV_OPTS})
-            WHERE {date_matches('RUN_DATE')}
-        ),
-
-        -- PFM_RADIUS WHERE run_date = to_number('$1')
-        RADIUS AS (
-            SELECT DISTINCT
-                {txt('MSISDN')}                                      AS MSISDN,
-                {txt('STATUS')}                                      AS STATUS
-            FROM read_csv_auto('{radius_path}', {CSV_OPTS})
-            WHERE {date_matches('RUN_DATE')}
-        ),
-
-        -- RD_T_IN_ADSL_HISTORICAL
-        -- WHERE PACKAGE_TYPE = 'DSL Status' AND run_date = to_date('$1','YYYYMMDD')
-        CHARGING AS (
-            SELECT DISTINCT
-                {txt('MSISDN')}                                      AS MSISDN,
-                {txt('STATUS')}                                      AS STATUS
-            FROM read_csv_auto('{charging_path}', {CSV_OPTS})
-            WHERE {txt('PACKAGE_TYPE')} = 'DSL Status'
-              AND {date_matches('RUN_DATE')}
-        ),
-
-        -- QUOTA_NAME_LKP WHERE Time = to_date('$1','YYYYMMDD')
-        QUOTA AS (
-            SELECT DISTINCT
-                {txt('MSISDN')}                                      AS MSISDN,
-                {txt('QUOTA_NAME')}                                  AS QUOTA_NAME
-            FROM read_csv_auto('{quota_path}', {CSV_OPTS})
-            WHERE {date_matches('"TIME"')}
-        ),
+        TE_SRC   AS (SELECT * FROM src_TE),
+        BSCS     AS (SELECT * FROM src_BSCS),
+        PCRF     AS (SELECT * FROM src_PCRF),
+        RADIUS   AS (SELECT * FROM src_RADIUS),
+        CHARGING AS (SELECT * FROM src_CHARGING),
+        QUOTA    AS (SELECT * FROM src_QUOTA),
 
         -- Inner query of the original SELECT
         TE AS (
             SELECT DISTINCT
                 TE_SRC.RUN_DATE,
                 TE_SRC.MSISDN                                        AS TE_MSISDN,
+                TE_SRC.MSISDN_KEY,
 
                 -- NVL(UPPER(DECODE(RADIUS.STATUS,'0','DeActive','1','Active','2','Suspended',RADIUS.STATUS)),'Not_Exist')
                 COALESCE(UPPER(CASE RADIUS.STATUS
@@ -182,10 +246,11 @@ con.execute(f"""
                       END)                                           AS PCRF_STATUS
 
             FROM TE_SRC
-            LEFT OUTER JOIN BSCS     ON TE_SRC.MSISDN = BSCS.MSISDN
-            LEFT OUTER JOIN PCRF     ON TE_SRC.MSISDN = PCRF.MSISDN
-            LEFT OUTER JOIN RADIUS   ON TE_SRC.MSISDN = RADIUS.MSISDN
-            LEFT OUTER JOIN CHARGING ON TE_SRC.MSISDN = CHARGING.MSISDN
+            -- joined on the normalised MSISDN (see msisdn_key)
+            LEFT OUTER JOIN BSCS     ON TE_SRC.MSISDN_KEY = BSCS.MSISDN_KEY
+            LEFT OUTER JOIN PCRF     ON TE_SRC.MSISDN_KEY = PCRF.MSISDN_KEY
+            LEFT OUTER JOIN RADIUS   ON TE_SRC.MSISDN_KEY = RADIUS.MSISDN_KEY
+            LEFT OUTER JOIN CHARGING ON TE_SRC.MSISDN_KEY = CHARGING.MSISDN_KEY
         )
 
         SELECT DISTINCT
@@ -225,7 +290,7 @@ con.execute(f"""
             NULLIF(regexp_extract(QUOTA.QUOTA_NAME, '[0-9]+M'), '') AS SPEED
         FROM TE
         LEFT OUTER JOIN QUOTA
-            ON TE.TE_MSISDN = QUOTA.MSISDN
+            ON TE.MSISDN_KEY = QUOTA.MSISDN_KEY
 """)
 
 # Second step of the original script:
