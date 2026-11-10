@@ -39,7 +39,7 @@ run_date_formatted = f"{run_date[:4]}-{run_date[4:6]}-{run_date[6:]}"
 file_date = run_date
 
 # Source exports (one per Oracle table in the original query)
-te_path = f"/RAIDdata/PI/PI_PRJ/exports/te_data_base_{file_date}.csv"            # RD_T_TE_DATA_BASE_HISTORICAL
+te_path = f"/project/PLATFORM_INTEGRITY/exports/TE_data_{run_date}.csv"         # RD_T_TE_DATA_BASE_HISTORICAL (output of te_data/te_data.py)
 bscs_path = f"/RAIDdata/PI/PI_PRJ/exports/bscs_profiles_adsl_{file_date}.csv"    # PFM_BSCS_ADSL
 pcrf_path = f"/RAIDdata/PI/PI_PRJ/exports/pcrf_{file_date}.csv"                  # PFM_PCRF_FILTERED
 radius_path = f"/RAIDdata/PI/PI_PRJ/exports/radius_{file_date}.csv"              # PFM_RADIUS

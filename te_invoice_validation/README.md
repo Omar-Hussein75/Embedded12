@@ -32,6 +32,8 @@ its CSV export, and `QUOTA_NAME_LKP` is replaced by the output of the
   `duckdb_connection()`. It's the same helper the quota lookup flow uses. The
   script adds the project root (the parent of `te_invoice_validation/`) to
   `sys.path`.
+- **TE data flow** (`te_data/te_data.py --run_date <YYYYMMDD>`) must already
+  have run for the same date. It produces `TE_data_<run_date>.csv`.
 - **Quota lookup flow** must already have run for the same date (see
   [Inputs](#inputs)).
 
@@ -57,7 +59,7 @@ Expected layout:
 
    | Variable | Default |
    |----------|---------|
-   | `te_path` | `/RAIDdata/PI/PI_PRJ/exports/te_data_base_<file_date>.csv` |
+   | `te_path` | `/project/PLATFORM_INTEGRITY/exports/TE_data_<run_date>.csv` (output of the TE data flow) |
    | `bscs_path` | `/RAIDdata/PI/PI_PRJ/exports/bscs_profiles_adsl_<file_date>.csv` |
    | `pcrf_path` | `/RAIDdata/PI/PI_PRJ/exports/pcrf_<file_date>.csv` |
    | `radius_path` | `/RAIDdata/PI/PI_PRJ/exports/radius_<file_date>.csv` |
@@ -65,8 +67,8 @@ Expected layout:
    | `quota_path` | `/project/PLATFORM_INTEGRITY/exports/quota_lkb_<run_date>.csv` |
    | `export_path` | `/project/PLATFORM_INTEGRITY/exports/te_invoice_validation_<run_date>.csv` |
 
-   > The **TE** and **RADIUS** file names are placeholders that follow the
-   > naming used by the other exports. Change them to the real file names.
+   > The **RADIUS** file name is a placeholder that follows the naming used by
+   > the other exports. Change it to the real file name.
 
 4. `file_date` (the date stamp in the file names) defaults to `run_date`. Set it
    by hand only if your snapshot files carry a different date.
@@ -75,8 +77,8 @@ Expected layout:
 
 ## Execution
 
-1. Run the quota lookup flow for the date first, so that
-   `quota_lkb_<run_date>.csv` exists.
+1. Run the TE data flow and the quota lookup flow for the date first, so that
+   `TE_data_<run_date>.csv` and `quota_lkb_<run_date>.csv` exist.
 2. Run this flow from the project root. Pass the run date as `YYYYMMDD`; it
    replaces the `$1` of the original shell script:
 
@@ -106,7 +108,7 @@ across all sources. `RUN_DATE` may be stored as `20260928` or `2026-09-28`.
 
 | Source (Oracle table) | Export | Filter applied | Columns used |
 |-----------------------|--------|----------------|--------------|
-| `RD_T_TE_DATA_BASE_HISTORICAL` | `te_path` | `RUN_DATE` = run date | `RUN_DATE`, `MSISDN`, `TE_SPEED` |
+| `RD_T_TE_DATA_BASE_HISTORICAL` | `te_path` (TE data flow output) | `RUN_DATE` = run date | `RUN_DATE`, `MSISDN`, `TE_SPEED` |
 | `PFM_BSCS_ADSL` | `bscs_path` | `RUN_DATE` = run date | `RUN_DATE`, `MSISDN`, `STATUS`, `TYPE` |
 | `PFM_PCRF_FILTERED` | `pcrf_path` | `RUN_DATE` = run date | `RUN_DATE`, `MSISDN`, `CUSTOMER_STATUS` |
 | `PFM_RADIUS` | `radius_path` | `RUN_DATE` = run date | `RUN_DATE`, `MSISDN`, `STATUS` |
