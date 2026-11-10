@@ -7,7 +7,6 @@ PROJECT_ROOT = os.path.abspath(
 sys.path.insert(0, PROJECT_ROOT)
 
 import re
-import glob
 import argparse
 from datetime import datetime
 
@@ -20,25 +19,11 @@ from utils.export_to_oracle import run_sqlldr
 from utils.dump_vs_database import validate_loaded_data
 
 
-# Raw TE files dropped by the business.
-# Only files whose name contains the run date are loaded, e.g.
-#   TE_Numbers_20260928.xlsx / TE_Numbers 2026-09-28.xlsx / TE_Numbers_2026_09_28.xlsx
-# Revisit once the file naming is aligned with the business.
-TE_FILES_PATTERN = "/RAIDdata/PI/TE_DATA/raw/TE_Numbers*.xlsx"
+# Raw TE file dropped by the business: one CSV per run date
+TE_INPUT_PATTERN = "/RAIDdata/PI/TE_DATA/raw/TE_NUMBERS_{run_date}.csv"
 
 # Output read by the downstream flows (e.g. te_invoice_validation as te_path)
 TE_CSV_PATTERN = "/project/PLATFORM_INTEGRITY/exports/TE_data_{run_date}.csv"
-
-
-def _te_files_for_run_date(run_date: str) -> list:
-    """TE files whose name contains the run date (YYYYMMDD, YYYY-MM-DD or YYYY_MM_DD)."""
-    y, m, d = run_date[:4], run_date[4:6], run_date[6:]
-    # the date must not be part of a longer number (e.g. 1202609281)
-    date_re = re.compile(rf"(?<!\d)(?:{y}{m}{d}|{y}-{m}-{d}|{y}_{m}_{d})(?!\d)")
-    return sorted(
-        f for f in glob.glob(TE_FILES_PATTERN)
-        if date_re.search(os.path.basename(f))
-    )
 
 
 def _sql_str(value: str) -> str:
@@ -48,12 +33,12 @@ def _sql_str(value: str) -> str:
 
 def _te_select(file_path: str, run_date_formatted: str) -> str:
     """
-    SELECT for one TE workbook.
+    SELECT for the TE input CSV (every column read as text).
 
     MSISDN normalisation (result is always 20 + national number):
-      - numeric cells (read as 225551234 or 225551234.0) are cast to an integer,
-        which drops the trailing .0 and any leading 0
-      - text cells with spaces/dashes/+ are reduced to their digits
+      - plain numbers (225551234, 0225551234, 225551234.0) are cast to an
+        integer, which drops any leading 0 and trailing .0
+      - values with spaces/dashes/+ are reduced to their digits
       - numbers that already carry the 20 country code (11 digits starting
         with 20) are not prefixed a second time
     """
@@ -75,11 +60,11 @@ def _te_select(file_path: str, run_date_formatted: str) -> str:
         FROM (
             SELECT
                 {digits}                                         AS digits,
-                -- numeric speed cells come back as 30.0 -> keep them as 30
+                -- speeds exported as 30.0 -> keep them as 30
                 NULLIF(regexp_replace(TRIM(CAST(Speed AS VARCHAR)), '\\.0+$', ''), '')
                                                                  AS TE_SPEED,
                 DATE '{run_date_formatted}'                      AS RUN_DATE
-            FROM read_xlsx({_sql_str(file_path)}, header = True)
+            FROM read_csv({_sql_str(file_path)}, header = TRUE, all_varchar = TRUE)
         )
     """
 
@@ -107,26 +92,19 @@ def load_TE_data(run_date: str, con=None):
         run_date_formatted = f"{run_date[:4]}-{run_date[4:6]}-{run_date[6:]}"
         csv_path = TE_CSV_PATTERN.format(run_date=run_date)
 
-        files = _te_files_for_run_date(run_date)
+        file_path = TE_INPUT_PATTERN.format(run_date=run_date)
 
-        logger.info(f"Found {len(files)} TE_data files:")
-        for file_path in files:
-            logger.info(f"  {file_path}")
-
-        if not files:
+        if not os.path.isfile(file_path):
             raise FileNotFoundError(
-                f"No TE_data XLSX file for run_date= {run_date} matching "
-                f"{TE_FILES_PATTERN} (the file name must contain {run_date} "
-                f"or {run_date_formatted})"
+                f"TE input file not found for run_date= {run_date}: {file_path}"
             )
+        logger.info(f"Reading TE_data file: {file_path}")
 
-        query = "\nUNION ALL\n".join(
-            _te_select(file_path, run_date_formatted) for file_path in files
-        )
+        query = _te_select(file_path, run_date_formatted)
 
         con.execute(f""" CREATE OR REPLACE TEMP TABLE TE_data_raw AS {query} """)
 
-        # Rows without a usable phone number (blank Excel rows, text in TEL, ...)
+        # Rows without a usable phone number (empty TEL, text in TEL, ...)
         # cannot be matched by any downstream flow, so they are not loaded.
         skipped = con.execute(
             "SELECT COUNT(*) FROM TE_data_raw WHERE MSISDN IS NULL"
@@ -147,7 +125,7 @@ def load_TE_data(run_date: str, con=None):
         if count == 0:
             raise ValueError(
                 f"No TE_data rows processed for run_date= {run_date} "
-                f"({len(files)} file(s) read, {skipped} row(s) skipped)"
+                f"(file: {file_path}, {skipped} row(s) skipped)"
             )
 
         os.makedirs(os.path.dirname(csv_path), exist_ok=True)
@@ -175,7 +153,7 @@ def load_TE_data(run_date: str, con=None):
             subject="TE DATA Flow Finished",
             content=f"""
                 Run Date : {run_date}
-                Files     : {len(files)}
+                File      : {os.path.basename(file_path)}
                 Rows      : {count}
                 Skipped   : {skipped}
                 DB Validation : Passed
