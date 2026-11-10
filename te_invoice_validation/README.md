@@ -118,6 +118,18 @@ trailing `.0` removed, leading `0`s removed and a leading `20` country code
 removed. All the examples above become `225551234`. `TE_MSISDN` in the output
 keeps the TE value unchanged.
 
+The `20` code is removed only from numbers that have 10 to 12 digits:
+
+| Number | Digits | Key |
+|--------|--------|-----|
+| `2035484718` (Alexandria, `03` + 7 digits) | 10 | `35484718` |
+| `20225551234` (Cairo, `02` + 8 digits) | 11 | `225551234` |
+| `201001234567` (mobile) | 12 | `1001234567` |
+
+National numbers never start with `20` at those lengths, so no real number is
+cut by mistake. When a source matches no TE line, the source check also prints
+3 sample numbers from each side with their keys.
+
 | Source (Oracle table) | Export | Filter applied | Columns used |
 |-----------------------|--------|----------------|--------------|
 | `RD_T_TE_DATA_BASE_HISTORICAL` | `te_path` (TE data flow output) | `RUN_DATE` = run date | `RUN_DATE`, `MSISDN`, `TE_SPEED` |

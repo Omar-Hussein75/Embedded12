@@ -100,13 +100,20 @@ def msisdn_key(col):
     Join key for an MSISDN, so the same line matches whatever format each
     export uses: 20225551234, 0225551234, 225551234, +20 2 2555 1234,
     225551234.0 all give 225551234 (national number, no 0 / 20 prefix).
+
+    The 20 country code is removed when the number has 10-12 digits:
+      2035484718   (10) -> 35484718    Alexandria: 03 + 7 digits
+      20225551234  (11) -> 225551234   Cairo / governorates: 2 or 3-digit code + 7/8 digits
+      201001234567 (12) -> 1001234567  mobile
+    National numbers never start with 20 at those lengths (landlines are
+    8-9 digits, mobiles start with 1), so no real number is cut by mistake.
     """
     digits = (
         f"LTRIM(regexp_replace(regexp_replace(TRIM({col}), '\\.0+$', ''), "
         f"'[^0-9]', '', 'g'), '0')"
     )
     return (
-        f"NULLIF(CASE WHEN {digits} LIKE '20%' AND LENGTH({digits}) IN (11, 12) "
+        f"NULLIF(CASE WHEN {digits} LIKE '20%' AND LENGTH({digits}) BETWEEN 10 AND 12 "
         f"THEN SUBSTR({digits}, 3) ELSE {digits} END, '')"
     )
 
@@ -198,6 +205,18 @@ for name, (path, _) in SOURCES.items():
     elif file_rows and not kept:
         line += "   <-- no TE rows for the run date, check the date format"
     print(line)
+
+    if name != "TE" and kept and not matched:
+        # show what the numbers look like on both sides, raw and normalised
+        for side, side_path in (("TE", te_path), (name, path)):
+            sample = con.execute(f"""
+                SELECT MSISDN, {msisdn_key('MSISDN')}
+                FROM read_csv_auto('{side_path}', {CSV_OPTS})
+                WHERE {txt('MSISDN')} IS NOT NULL
+                LIMIT 3
+            """).fetchall()
+            shown = ", ".join(f"{raw!r} -> {key!r}" for raw, key in sample)
+            print(f"      sample {side:<9} MSISDN -> key: {shown}")
 
 
 con.execute(f"""

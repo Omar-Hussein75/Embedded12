@@ -39,8 +39,9 @@ def _te_select(file_path: str, run_date_formatted: str) -> str:
       - plain numbers (225551234, 0225551234, 225551234.0) are cast to an
         integer, which drops any leading 0 and trailing .0
       - values with spaces/dashes/+ are reduced to their digits
-      - numbers that already carry the 20 country code (11 digits starting
-        with 20) are not prefixed a second time
+      - numbers that already carry the 20 country code (10-12 digits starting
+        with 20, e.g. 2035484718 / 20225551234 / 201001234567) are not prefixed
+        a second time; national numbers never start with 20 at those lengths
     """
     tel_txt = "TRIM(CAST(TEL AS VARCHAR))"
     digits = f"""
@@ -52,7 +53,7 @@ def _te_select(file_path: str, run_date_formatted: str) -> str:
     return f"""
         SELECT
             CASE
-                WHEN digits LIKE '20%' AND LENGTH(digits) = 11 THEN digits
+                WHEN digits LIKE '20%' AND LENGTH(digits) BETWEEN 10 AND 12 THEN digits
                 ELSE '20' || digits
             END                                                  AS MSISDN,
             TE_SPEED,
