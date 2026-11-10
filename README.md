@@ -1,50 +1,120 @@
-SELECT DISTINCT RUN_DATE,TE_MSISDN,RADIUS_STATUS ,BILLING_STATUS,CHARGING_STATUS,
-(CASE WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'ACTIVE'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='ACTIVE' THEN 'ACTIVE'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'ACTIVE'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='ACTIVE' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='SUSPENDED' THEN 'SUSPENDED'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'Not_Exist'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'Not_Exist/DEACTIVE'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='ACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='SUSPENDED' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='ACTIVE' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='ACTIVE' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='Not_Exist' AND BILLING_STATUS='SUSPENDED' AND CHARGING_STATUS='Not_Exist' THEN 'MISMATCH'
-WHEN RADIUS_STATUS='DEACTIVE' AND BILLING_STATUS='Not_Exist' AND CHARGING_STATUS='SUSPENDED' THEN 'MISMATCH'
-ELSE '_N' END)CASE_COMMENT,Customer_TYPE,PCRF_STATUS,QUOTA.QUOTA_NAME,te.te_speed AS TE_SPEED,
-REGEXP_SUBSTR(QUOTA.QUOTA_NAME,'[0-9]+M', 1, 1) AS speed
-FROM(
-SELECT DISTINCT TE.RUN_DATE, TE.MSISDN TE_MSISDN, NVL(UPPER(DECODE(RADIUS.STATUS,'0','DeActive','1','Active','2','Suspended',RADIUS.STATUS)), 'Not_Exist') RADIUS_STATUS ,
-NVL(BSCS.STATUS, 'Not_Exist') BILLING_STATUS, NVl(UPPER(CHARGING.STATUS), 'Not_Exist') CHARGING_STATUS,BSCS.TYPE AS Customer_TYPE,TE.te_speed,
-UPPER(DECODE(PCRF.Customer_STATUS,0,'DeActive',1,'Active',2,'Suspended',3,'On-Hold', PCRF.Customer_STATUS)) PCRF_STATUS
-FROM RP7VFEPIDAT.RD_T_TE_DATA_BASE_HISTORICAL  TE
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_BSCS_ADSL WHERE run_date = to_number('$1')) BSCS
-ON TE.MSISDN = BSCS.MSISDN
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_PCRF_FILTERED WHERE RUN_DATE = to_date('$1','YYYYMMDD')) PCRF
-ON TE.MSISDN = PCRF.MSISDN
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.PFM_RADIUS WHERE run_date = to_number('$1')) RADIUS
-ON TE.MSISDN = RADIUS.MSISDN
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.RD_T_IN_ADSL_HISTORICAL where (PACKAGE_TYPE ='DSL Status') AND run_date = to_date('$1','YYYYMMDD')) CHARGING
-ON TE.MSISDN = CHARGING.MSISDN
-)TE
-LEFT OUTER JOIN (SELECT DISTINCT * FROM RP7VFEPIDAT.QUOTA_NAME_LKP qnl WHERE Time =to_date('$1','YYYYMMDD')) QUOTA
-ON TE_MSISDN = QUOTA.MSISDN
-WHERE run_date = to_date('$1','YYYYMMDD');
+import os
+import sys
 
-COMMIT;
---------------------------------Then
-$ORACLE_HOME/bin/sqlplus -s <<END
-RP7VFEPIDAT/RP7VFEPIDAT@$GLOBAL_DB_ORACLE_SERVICE
+PROJECT_ROOT = os.path.abspath(
+os.path.join(os.path.dirname(__file__), "..")
+)
+sys.path.insert(0, PROJECT_ROOT)
 
-UPDATE  RP7VFEPIDAT.RD_T_TE_INVOICE_VALIDATION rttiv
-SET CUSTOMER_TYPE ='NA'
-WHERE CUSTOMER_TYPE IS NULL;
+import duckdb
+import argparse
+from datetime import datetime
+from config.duckdb_connection import duckdb_connection
+from utils.logger import get_logger
+from utils.send_mail import send_mail
+from utils.export_to_oracle import prepare_ctl
+from utils.export_to_oracle import run_sqlldr
+from utils.dump_vs_database import validate_loaded_data
+import glob
 
+def load_TE_data(run_date: str, con=None):
+
+    logger = get_logger(
+        flow="TE_data",
+        log_dir=None,  
+        run_date=run_date
+    )
+
+    try:
+        if con is None:
+            con = duckdb_connection()
+            
+        start_time = datetime.now()
+        logger.info(f"###################################################")
+        logger.info(f"###### TE_data started for run_date= {run_date} ######")
+        logger.info(f"###################################################")
+        run_date_formatted = f"{run_date[:4]}-{run_date[4:6]}-{run_date[6:]}"
+        csv_path = f"/project/PLATFORM_INTEGRITY/exports/TE_data_{run_date}.csv"
+        file_path = f"/RAIDdata/PI/TE_DATA/raw/TE_Numbers*.xlsx" ## Adjusting the code to include the rundate in the name, will be after alignment regarding naming with business
+
+
+        files = glob.glob("/RAIDdata/PI/TE_DATA/raw/TE_Numbers*.xlsx")
+
+        logger.info(f"Found {len(files)} TE_data files:")
+        for file_path in files:
+            logger.info(f"  {file_path}")
+
+        if not files:
+            raise FileNotFoundError(
+                "No TE_data XLSX files found matching TE_Numbers*.xlsx"
+            )
+
+        queries = []
+
+        for file_path in files:
+            queries.append(f"""
+                SELECT 
+                    '20' || CAST(
+                    TRY_CAST(
+                    TRY_CAST(TRIM(CAST(TEL AS VARCHAR)) AS DECIMAL(20,0))
+                    AS BIGINT
+                     ) AS VARCHAR
+                     ) AS MSISDN, 
+                    TRY_CAST(Speed AS VARCHAR) AS TE_SPEED, 
+                    CAST('{run_date_formatted}' AS DATE) AS RUN_DATE
+                FROM read_xlsx('{file_path}', header=True)
+            """)
+
+        query = "\nUNION ALL\n".join(queries)
+        
+        con.execute(f""" CREATE OR REPLACE TABLE TE_data AS {query} """)
+
+        count = con.execute("SELECT COUNT(*) FROM TE_data").fetchone()[0]
+        logger.info(f"Total processed rows: {count}")
+
+        if count == 0:
+            logger.info(f"No TE_data data processed!")
+            raise
+
+        logger.info(f"Exporting TE_data_{run_date}.csv ..")
+        con.execute(f""" COPY (SELECT RUN_DATE,  MSISDN, TE_SPEED  FROM TE_data) TO '{csv_path}' (DELIMITER ',', HEADER TRUE, QUOTE '"', ESCAPE '"'); """)
+        logger.info(f"Inserting into PI.TE_data table ..")
+        ctl_file = prepare_ctl("TE_data", run_date)
+        run_sqlldr("TE_data",run_date, ctl_file=ctl_file)
+        logger.info(f"Insertion done")
+
+        logger.info(f"Validating inserted data ..")
+        validate_loaded_data(
+        flow_name="TE_data",
+        run_date=run_date,
+        expected_rows=count,
+        logger=logger)
+        logger.info("Inserted data validated successfully.")
+
+        end_time = datetime.now()
+        logger.info(f"TE_data finished")
+        logger.info(f"TE_data total duration: {end_time - start_time}")
+        send_mail(
+                    subject="TE DATA Flow Finished",
+                    content=f"""
+                Run Date : {run_date}
+                Rows      : {count}
+                DB Validation : Passed
+                Duration  : {end_time - start_time}""")
+        return con.table("TE_data")
+    except Exception as e:
+        logger.exception(f"TE_data failed for run_date= {run_date} | error= {str(e)}")
+        send_mail(
+        subject="TE DATA Flow Failed",
+        content=f"""
+            Run Date : {run_date}
+            Error:
+            {str(e)}
+            """)
+        raise
+
+if __name__ == "__main__":
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--run_date", required=True)
+    args = parser.parse_args()
+    load_TE_data(run_date=args.run_date)
