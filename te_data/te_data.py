@@ -21,12 +21,24 @@ from utils.dump_vs_database import validate_loaded_data
 
 
 # Raw TE files dropped by the business.
-# Adjusting the code to include the run date in the name will be done after
-# alignment with the business on the file naming.
+# Only files whose name contains the run date are loaded, e.g.
+#   TE_Numbers_20260928.xlsx / TE_Numbers 2026-09-28.xlsx / TE_Numbers_2026_09_28.xlsx
+# Revisit once the file naming is aligned with the business.
 TE_FILES_PATTERN = "/RAIDdata/PI/TE_DATA/raw/TE_Numbers*.xlsx"
 
 # Output read by the downstream flows (e.g. te_invoice_validation as te_path)
 TE_CSV_PATTERN = "/project/PLATFORM_INTEGRITY/exports/TE_data_{run_date}.csv"
+
+
+def _te_files_for_run_date(run_date: str) -> list:
+    """TE files whose name contains the run date (YYYYMMDD, YYYY-MM-DD or YYYY_MM_DD)."""
+    y, m, d = run_date[:4], run_date[4:6], run_date[6:]
+    # the date must not be part of a longer number (e.g. 1202609281)
+    date_re = re.compile(rf"(?<!\d)(?:{y}{m}{d}|{y}-{m}-{d}|{y}_{m}_{d})(?!\d)")
+    return sorted(
+        f for f in glob.glob(TE_FILES_PATTERN)
+        if date_re.search(os.path.basename(f))
+    )
 
 
 def _sql_str(value: str) -> str:
@@ -95,7 +107,7 @@ def load_TE_data(run_date: str, con=None):
         run_date_formatted = f"{run_date[:4]}-{run_date[4:6]}-{run_date[6:]}"
         csv_path = TE_CSV_PATTERN.format(run_date=run_date)
 
-        files = sorted(glob.glob(TE_FILES_PATTERN))
+        files = _te_files_for_run_date(run_date)
 
         logger.info(f"Found {len(files)} TE_data files:")
         for file_path in files:
@@ -103,7 +115,9 @@ def load_TE_data(run_date: str, con=None):
 
         if not files:
             raise FileNotFoundError(
-                f"No TE_data XLSX files found matching {TE_FILES_PATTERN}"
+                f"No TE_data XLSX file for run_date= {run_date} matching "
+                f"{TE_FILES_PATTERN} (the file name must contain {run_date} "
+                f"or {run_date_formatted})"
             )
 
         query = "\nUNION ALL\n".join(
