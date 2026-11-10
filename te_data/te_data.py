@@ -35,38 +35,21 @@ def _te_select(file_path: str, run_date_formatted: str) -> str:
     """
     SELECT for the TE input CSV (every column read as text).
 
-    MSISDN normalisation (result is always 20 + national number):
-      - plain numbers (225551234, 0225551234, 225551234.0) are cast to an
-        integer, which drops any leading 0 and trailing .0
-      - values with spaces/dashes/+ are reduced to their digits
-      - numbers that already carry the 20 country code (10-12 digits starting
-        with 20, e.g. 2035484718 / 20225551234 / 201001234567) are not prefixed
-        a second time; national numbers never start with 20 at those lengths
+    MSISDN: TEL is loaded exactly as it is in the file (only surrounding spaces
+    are trimmed); nothing is added or removed. Only values made of 10 to 12
+    digits are kept, anything else is NULL and skipped by load_TE_data.
     """
-    tel_txt = "TRIM(CAST(TEL AS VARCHAR))"
-    digits = f"""
-        COALESCE(
-            CAST(TRY_CAST(TRY_CAST({tel_txt} AS DECIMAL(20,0)) AS BIGINT) AS VARCHAR),
-            NULLIF(LTRIM(regexp_replace({tel_txt}, '[^0-9]', '', 'g'), '0'), '')
-        )"""
+    tel = "TRIM(TEL)"
 
     return f"""
         SELECT
-            CASE
-                WHEN digits LIKE '20%' AND LENGTH(digits) BETWEEN 10 AND 12 THEN digits
-                ELSE '20' || digits
-            END                                                  AS MSISDN,
-            TE_SPEED,
-            RUN_DATE
-        FROM (
-            SELECT
-                {digits}                                         AS digits,
-                -- speeds exported as 30.0 -> keep them as 30
-                NULLIF(regexp_replace(TRIM(CAST(Speed AS VARCHAR)), '\\.0+$', ''), '')
+            CASE WHEN regexp_full_match({tel}, '[0-9]{{10,12}}') THEN {tel} END
+                                                                 AS MSISDN,
+            -- speeds exported as 30.0 -> keep them as 30
+            NULLIF(regexp_replace(TRIM(Speed), '\\.0+$', ''), '')
                                                                  AS TE_SPEED,
-                DATE '{run_date_formatted}'                      AS RUN_DATE
-            FROM read_csv({_sql_str(file_path)}, header = TRUE, all_varchar = TRUE)
-        )
+            DATE '{run_date_formatted}'                          AS RUN_DATE
+        FROM read_csv({_sql_str(file_path)}, header = TRUE, all_varchar = TRUE)
     """
 
 
@@ -105,13 +88,13 @@ def load_TE_data(run_date: str, con=None):
 
         con.execute(f""" CREATE OR REPLACE TEMP TABLE TE_data_raw AS {query} """)
 
-        # Rows without a usable phone number (empty TEL, text in TEL, ...)
+        # Rows without a valid phone number (empty, not digits, not 10-12 digits)
         # cannot be matched by any downstream flow, so they are not loaded.
         skipped = con.execute(
             "SELECT COUNT(*) FROM TE_data_raw WHERE MSISDN IS NULL"
         ).fetchone()[0]
         if skipped:
-            logger.warning(f"Skipped {skipped} rows with an empty or invalid TEL")
+            logger.warning(f"Skipped {skipped} rows whose TEL is empty or not 10-12 digits")
 
         con.execute("""
             CREATE OR REPLACE TABLE TE_data AS

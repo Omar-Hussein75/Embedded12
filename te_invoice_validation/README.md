@@ -111,24 +111,15 @@ formats: `20260928`, `2026-09-28`, `2026-09-28 00:00:00`, `28/09/2026`,
 `28/09/2026 00:00:00`, `28-SEP-26` or `28-SEP-2026`. Only midnight matches,
 as with Oracle's `to_date`.
 
-**MSISDNs.** The sources don't all write numbers the same way. For example the
-TE data flow writes `20225551234`, while another export may have `0225551234`
-or `225551234`. Every source is joined on a normalised key: digits only, a
-trailing `.0` removed, leading `0`s removed and a leading `20` country code
-removed. All the examples above become `225551234`. `TE_MSISDN` in the output
-keeps the TE value unchanged.
+**MSISDNs.** Numbers are used exactly as they are in each export. Only
+surrounding spaces are trimmed; no country code or `0` is added or removed.
+Only values made of **10 to 12 digits** take part in the joins, and a TE line
+matches a source only when both have the identical number. For example,
+`2035484718` matches `2035484718` but not `035484718` or `35484718`.
+`TE_MSISDN` in the output is the TE value unchanged.
 
-The `20` code is removed only from numbers that have 10 to 12 digits:
-
-| Number | Digits | Key |
-|--------|--------|-----|
-| `2035484718` (Alexandria, `03` + 7 digits) | 10 | `35484718` |
-| `20225551234` (Cairo, `02` + 8 digits) | 11 | `225551234` |
-| `201001234567` (mobile) | 12 | `1001234567` |
-
-National numbers never start with `20` at those lengths, so no real number is
-cut by mistake. When a source matches no TE line, the source check also prints
-3 sample numbers from each side with their keys.
+When a source matches no TE line, the source check also prints 3 sample
+numbers from each side, so a format difference is easy to spot.
 
 | Source (Oracle table) | Export | Filter applied | Columns used |
 |-----------------------|--------|----------------|--------------|
@@ -163,7 +154,7 @@ If every status is `Not_Exist` and PCRF/quota are empty, this check shows why:
 | What you see | Likely cause |
 |--------------|--------------|
 | `rows for run date: 0` while `file rows` > 0 | `RUN_DATE`/`TIME` is in a format not in the list above, or the file holds another date |
-| `TE lines matched: 0` while `rows for run date` > 0 | The MSISDN format can't be matched to TE. Compare a few numbers from both files |
+| `TE lines matched: 0` while `rows for run date` > 0 | The numbers are written differently from TE (e.g. `035484718` vs `2035484718`) or aren't 10-12 digits. Compare the printed samples |
 | TE `rows for run date: 0` | The TE file is for another date. Rerun the TE data flow for this date |
 
 ---

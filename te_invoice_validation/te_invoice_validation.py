@@ -97,24 +97,14 @@ def date_matches(col):
 
 def msisdn_key(col):
     """
-    Join key for an MSISDN, so the same line matches whatever format each
-    export uses: 20225551234, 0225551234, 225551234, +20 2 2555 1234,
-    225551234.0 all give 225551234 (national number, no 0 / 20 prefix).
-
-    The 20 country code is removed when the number has 10-12 digits:
-      2035484718   (10) -> 35484718    Alexandria: 03 + 7 digits
-      20225551234  (11) -> 225551234   Cairo / governorates: 2 or 3-digit code + 7/8 digits
-      201001234567 (12) -> 1001234567  mobile
-    National numbers never start with 20 at those lengths (landlines are
-    8-9 digits, mobiles start with 1), so no real number is cut by mistake.
+    Join key for an MSISDN: the value exactly as it is in the export (only
+    surrounding spaces trimmed) - nothing is added or removed. Only values of
+    10 to 12 digits take part in the join; anything else gets no key and
+    therefore no match.
     """
-    digits = (
-        f"LTRIM(regexp_replace(regexp_replace(TRIM({col}), '\\.0+$', ''), "
-        f"'[^0-9]', '', 'g'), '0')"
-    )
     return (
-        f"NULLIF(CASE WHEN {digits} LIKE '20%' AND LENGTH({digits}) BETWEEN 10 AND 12 "
-        f"THEN SUBSTR({digits}, 3) ELSE {digits} END, '')"
+        f"CASE WHEN regexp_full_match(TRIM({col}), '[0-9]{{10,12}}') "
+        f"THEN TRIM({col}) END"
     )
 
 
